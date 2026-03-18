@@ -10,6 +10,7 @@ BlackS Wallet — Telegram Bot
 import os
 import logging
 import threading
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class Health(BaseHTTPRequestHandler):
@@ -18,6 +19,11 @@ class Health(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'OK')
     def log_message(self, *args): pass
+
+threading.Thread(
+    target=lambda: HTTPServer(('0.0.0.0', 10000), Health).serve_forever(),
+    daemon=True
+).start()
 
 threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 10000), Health).serve_forever(), daemon=True).start()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
