@@ -1,7 +1,7 @@
 """
 BlackS Wallet — Telegram Bot
 Запуск: python bot.py
-Деплой: Railway / Render (бесплатно)
+Деплой: Railway / Render
 
 Установка зависимостей:
   pip install python-telegram-bot==20.7
@@ -10,9 +10,9 @@ BlackS Wallet — Telegram Bot
 import os
 import logging
 import threading
-import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# ── Health check сервер (для Railway/Render) ──────────────
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,17 +21,16 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
 
 threading.Thread(
-    target=lambda: HTTPServer(('0.0.0.0', 10000), Health).serve_forever(),
+    target=lambda: HTTPServer(('0.0.0.0', int(os.getenv('PORT', 10000))), Health).serve_forever(),
     daemon=True
 ).start()
 
-threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 10000), Health).serve_forever(), daemon=True).start()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ── Конфиг ────────────────────────────────────────────────
-BOT_TOKEN  = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_СЮДА")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://ВАШ_ДОМЕН.vercel.app")
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -42,8 +41,11 @@ logger = logging.getLogger(__name__)
 
 # ── /start ────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     user = update.effective_user
-    name = user.first_name or "there"
+    name = user.first_name if user and user.first_name else "there"
 
     keyboard = [[
         InlineKeyboardButton(
@@ -72,6 +74,8 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── /help ─────────────────────────────────────────────────
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     await update.message.reply_text(
         "ℹ️ <b>BlackS Wallet Help</b>\n\n"
         "/start — Open your wallet\n"
@@ -84,6 +88,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── /support ──────────────────────────────────────────────
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     await update.message.reply_text(
         "💬 <b>Support</b>\n\n"
         "If you have any issues with deposits or your account, contact us:\n\n"
@@ -95,6 +101,8 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Unknown command ───────────────────────────────────────
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     keyboard = [[
         InlineKeyboardButton("Open Wallet 🚀", web_app=WebAppInfo(url=WEBAPP_URL))
     ]]
@@ -106,6 +114,13 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Main ──────────────────────────────────────────────────
 def main() -> None:
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is not set! Set it as an environment variable.")
+        return
+    if not WEBAPP_URL:
+        logger.error("WEBAPP_URL is not set! Set it as an environment variable.")
+        return
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start",   start))
@@ -114,8 +129,11 @@ def main() -> None:
     app.add_handler(CommandHandler("support", support))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    logger.info("Bot started. Polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info(f"Bot started. WEBAPP_URL: {WEBAPP_URL}")
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True   # игнорировать накопившиеся апдейты при рестарте
+    )
 
 
 if __name__ == "__main__":
