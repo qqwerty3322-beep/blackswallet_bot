@@ -43,44 +43,65 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/send_otp':
             self._send_otp()
+        elif self.path == '/send_message':
+            self._send_message()
         else:
             self.send_response(404)
             self.end_headers()
 
     def _send_otp(self):
+        self._send_to_user('otp')
+
+    def _send_message(self):
+        self._send_to_user('message')
+
+    def _send_to_user(self, mode):
         try:
             n    = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(n))
             tg_id = data.get('tg_id')
-            code  = data.get('code')
-            email = data.get('email', '')
 
-            if not tg_id or not code:
-                self._json(400, {'ok': False, 'error': 'tg_id and code required'})
+            if not tg_id:
+                self._json(400, {'ok': False, 'error': 'tg_id required'})
                 return
+
+            if mode == 'otp':
+                code  = data.get('code')
+                email = data.get('email', '')
+                if not code:
+                    self._json(400, {'ok': False, 'error': 'code required'})
+                    return
+                text = (
+                    f"🔐 <b>BlackS Wallet — Verification Code</b>\n\n"
+                    f"Your code: <code>{code}</code>\n\n"
+                    f"Valid for <b>10 minutes</b>.\n"
+                    f"Never share this code with anyone."
+                )
+                log_msg = f"OTP {code} sent to {tg_id} ({email})"
+            else:
+                text = data.get('text', '').strip()
+                if not text:
+                    self._json(400, {'ok': False, 'error': 'text required'})
+                    return
+                log_msg = f"Message sent to {tg_id}"
 
             if _app and _loop:
                 future = asyncio.run_coroutine_threadsafe(
                     _app.bot.send_message(
                         chat_id=int(tg_id),
-                        text=(
-                            f"🔐 <b>BlackS Wallet — Verification Code</b>\n\n"
-                            f"Your code: <code>{code}</code>\n\n"
-                            f"Valid for <b>10 minutes</b>.\n"
-                            f"Never share this code with anyone."
-                        ),
+                        text=text,
                         parse_mode='HTML'
                     ),
                     _loop
                 )
                 future.result(timeout=10)
-                logger.info(f"OTP {code} sent to {tg_id} ({email})")
+                logger.info(log_msg)
                 self._json(200, {'ok': True})
             else:
                 self._json(503, {'ok': False, 'error': 'Bot not ready'})
 
         except Exception as e:
-            logger.error(f"send_otp error: {e}")
+            logger.error(f"send error: {e}")
             self._json(500, {'ok': False, 'error': str(e)})
 
     def _json(self, status, data):
