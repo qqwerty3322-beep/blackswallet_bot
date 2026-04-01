@@ -28,11 +28,6 @@ _loop = None
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'BlackS Wallet Bot OK')
-
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -48,6 +43,35 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def do_GET(self):
+        if self.path.startswith('/get_chat'):
+            self._get_chat()
+        else:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'BlackS Wallet Bot OK')
+
+    def _get_chat(self):
+        import urllib.parse, urllib.request
+        try:
+            qs = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(qs)
+            tg_id = params.get('tg_id', [None])[0]
+            if not tg_id:
+                self._json(400, {'ok': False, 'error': 'tg_id required'})
+                return
+            token = BOT_TOKEN
+            url = f'https://api.telegram.org/bot{token}/getChat?chat_id={tg_id}'
+            with urllib.request.urlopen(url, timeout=8) as r:
+                data = r.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json(500, {'ok': False, 'error': str(e)})
 
     def _send_otp(self):
         self._send_to_user('otp')
