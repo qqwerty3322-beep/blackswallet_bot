@@ -1,5 +1,5 @@
 """
-BlackS Wallet — Telegram Bot
+BlackS Wallet — Telegram Bot + Supabase Proxy
 Деплой: Render (Web Service)
 
 Зависимости:
@@ -11,11 +11,17 @@ import json
 import logging
 import asyncio
 import threading
+import urllib.parse
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 PORT       = int(os.getenv("PORT", 10000))
+
+# Supabase credentials (proxied — clients don't need direct access)
+SB_URL = "https://rvduytgfwtyytodyxmfo.supabase.co"
+SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ2ZHV5dGdmd3R5eXRvZHl4bWZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4MzMwNjEsImV4cCI6MjA4OTQwOTA2MX0.OHS7vQwJlicKmTiONLzjG7-N18tz_-_rZmSADuocLfA"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,75 +29,172 @@ logger = logging.getLogger(__name__)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-_app = None
+_app  = None
 _loop = None
 
 
+# ══════════════════════════════════════════════════════════
+# HTTP HANDLER
+# ══════════════════════════════════════════════════════════
 class Handler(BaseHTTPRequestHandler):
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
 
+    # ── CORS preflight ────────────────────────────────────
+    def do_OPTIONS(self):
+        self._cors(200)
+
+    # ── GET ───────────────────────────────────────────────
+    def do_GET(self):
+        p = self.path
+        if p.startswith('/proxy'):
+            self._sb_proxy_get()
+        elif p.startswith('/get_chat'):
+            self._get_chat()
+        else:
+            self.send_response(200)
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.write(b'BlackS Wallet Bot OK')
+
+    # ── POST ──────────────────────────────────────────────
     def do_POST(self):
-        if self.path == '/send_otp':
-            self._send_otp()
-        elif self.path == '/send_message':
-            self._send_message()
+        p = self.path
+        if p.startswith('/proxy'):
+            self._sb_proxy_post()
+        elif p == '/send_otp':
+            self._send_to_user('otp')
+        elif p == '/send_message':
+            self._send_to_user('message')
         else:
             self.send_response(404)
             self.end_headers()
 
-    def do_GET(self):
-        if self.path.startswith('/get_chat'):
-            self._get_chat()
+    # ── PATCH ─────────────────────────────────────────────
+    def do_PATCH(self):
+        if self.path.startswith('/proxy'):
+            self._sb_proxy_patch()
         else:
-            self.send_response(200)
+            self.send_response(404)
             self.end_headers()
-            self.wfile.write(b'BlackS Wallet Bot OK')
 
-    def _get_chat(self):
-        import urllib.parse, urllib.request
+    # ── DELETE ────────────────────────────────────────────
+    def do_DELETE(self):
+        if self.path.startswith('/proxy'):
+            self._sb_proxy_delete()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    # ══════════════════════════════════════════════════════
+    # SUPABASE PROXY
+    # Принимает запросы вида:
+    #   GET    /proxy/tablename?filter=...
+    #   POST   /proxy/tablename          body: JSON
+    #   PATCH  /proxy/tablename?filter=  body: JSON
+    #   DELETE /proxy/tablename?filter=
+    # ══════════════════════════════════════════════════════
+    def _sb_path(self):
+        """Extract /proxy/TABLE?QUERY → TABLE, QUERY"""
+        parsed = urllib.parse.urlparse(self.path)
+        table  = parsed.path.replace('/proxy/', '').split('/')[0]
+        query  = parsed.query
+        return table, query
+
+    def _sb_headers(self, extra=None):
+        h = {
+            'apikey':        SB_KEY,
+            'Authorization': 'Bearer ' + SB_KEY,
+            'Content-Type':  'application/json',
+            'Prefer':        'return=representation',
+        }
+        if extra:
+            h.update(extra)
+        return h
+
+    def _sb_proxy_get(self):
+        table, query = self._sb_path()
+        url = f"{SB_URL}/rest/v1/{table}?{query}"
         try:
-            qs = urllib.parse.urlparse(self.path).query
+            req  = urllib.request.Request(url, headers=self._sb_headers())
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = r.read()
+            self._raw(200, body)
+        except urllib.error.HTTPError as e:
+            self._raw(e.code, e.read())
+        except Exception as e:
+            self._json(500, {'error': str(e)})
+
+    def _sb_proxy_post(self):
+        table, query = self._sb_path()
+        url  = f"{SB_URL}/rest/v1/{table}"
+        if query:
+            url += '?' + query
+        body = self._read_body()
+        try:
+            req  = urllib.request.Request(url, data=body, headers=self._sb_headers(
+                {'Prefer': 'resolution=merge-duplicates,return=representation'}
+            ), method='POST')
+            with urllib.request.urlopen(req, timeout=10) as r:
+                resp = r.read()
+            self._raw(200, resp)
+        except urllib.error.HTTPError as e:
+            self._raw(e.code, e.read())
+        except Exception as e:
+            self._json(500, {'error': str(e)})
+
+    def _sb_proxy_patch(self):
+        table, query = self._sb_path()
+        url  = f"{SB_URL}/rest/v1/{table}?{query}"
+        body = self._read_body()
+        try:
+            req  = urllib.request.Request(url, data=body, headers=self._sb_headers(), method='PATCH')
+            with urllib.request.urlopen(req, timeout=10) as r:
+                resp = r.read()
+            self._raw(200, resp)
+        except urllib.error.HTTPError as e:
+            self._raw(e.code, e.read())
+        except Exception as e:
+            self._json(500, {'error': str(e)})
+
+    def _sb_proxy_delete(self):
+        table, query = self._sb_path()
+        url = f"{SB_URL}/rest/v1/{table}?{query}"
+        try:
+            req = urllib.request.Request(url, headers=self._sb_headers(), method='DELETE')
+            with urllib.request.urlopen(req, timeout=10) as r:
+                resp = r.read()
+            self._raw(200, resp)
+        except urllib.error.HTTPError as e:
+            self._raw(e.code, e.read())
+        except Exception as e:
+            self._json(500, {'error': str(e)})
+
+    # ── Telegram: get_chat ────────────────────────────────
+    def _get_chat(self):
+        try:
+            qs     = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
-            tg_id = params.get('tg_id', [None])[0]
+            tg_id  = params.get('tg_id', [None])[0]
             if not tg_id:
                 self._json(400, {'ok': False, 'error': 'tg_id required'})
                 return
-            token = BOT_TOKEN
-            url = f'https://api.telegram.org/bot{token}/getChat?chat_id={tg_id}'
+            url = f'https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={tg_id}'
             with urllib.request.urlopen(url, timeout=8) as r:
                 data = r.read()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(data)
+            self._raw(200, data)
         except Exception as e:
             self._json(500, {'ok': False, 'error': str(e)})
 
-    def _send_otp(self):
-        self._send_to_user('otp')
-
-    def _send_message(self):
-        self._send_to_user('message')
-
+    # ── Telegram: send OTP / message ─────────────────────
     def _send_to_user(self, mode):
         try:
-            n    = int(self.headers.get('Content-Length', 0))
-            data = json.loads(self.rfile.read(n))
+            data  = json.loads(self._read_body())
             tg_id = data.get('tg_id')
-
             if not tg_id:
                 self._json(400, {'ok': False, 'error': 'tg_id required'})
                 return
 
             if mode == 'otp':
-                code  = data.get('code')
-                email = data.get('email', '')
+                code = data.get('code')
                 if not code:
                     self._json(400, {'ok': False, 'error': 'code required'})
                     return
@@ -101,45 +204,58 @@ class Handler(BaseHTTPRequestHandler):
                     f"Valid for <b>10 minutes</b>.\n"
                     f"Never share this code with anyone."
                 )
-                log_msg = f"OTP {code} sent to {tg_id} ({email})"
             else:
                 text = data.get('text', '').strip()
                 if not text:
                     self._json(400, {'ok': False, 'error': 'text required'})
                     return
-                log_msg = f"Message sent to {tg_id}"
 
             if _app and _loop:
                 future = asyncio.run_coroutine_threadsafe(
-                    _app.bot.send_message(
-                        chat_id=int(tg_id),
-                        text=text,
-                        parse_mode='HTML'
-                    ),
+                    _app.bot.send_message(chat_id=int(tg_id), text=text, parse_mode='HTML'),
                     _loop
                 )
                 future.result(timeout=10)
-                logger.info(log_msg)
                 self._json(200, {'ok': True})
             else:
                 self._json(503, {'ok': False, 'error': 'Bot not ready'})
 
         except Exception as e:
-            logger.error(f"send error: {e}")
             self._json(500, {'ok': False, 'error': str(e)})
 
-    def _json(self, status, data):
-        body = json.dumps(data).encode()
+    # ── Helpers ───────────────────────────────────────────
+    def _read_body(self):
+        n = int(self.headers.get('Content-Length', 0))
+        return self.rfile.read(n)
+
+    def _cors_headers(self):
+        self.send_header('Access-Control-Allow-Origin',  '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, apikey, Authorization, Prefer')
+
+    def _cors(self, status):
+        self.send_response(status)
+        self._cors_headers()
+        self.end_headers()
+
+    def _raw(self, status, body):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', len(body))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _json(self, status, data):
+        body = json.dumps(data).encode()
+        self._raw(status, body)
 
     def log_message(self, *args): pass
 
 
+# ══════════════════════════════════════════════════════════
+# BOT HANDLERS
+# ══════════════════════════════════════════════════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     name = update.effective_user.first_name or "there"
@@ -173,21 +289,22 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Use /start to open your wallet.", reply_markup=InlineKeyboardMarkup(kb))
 
 
+# ══════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════
 def main():
     global _app, _loop
 
     if not BOT_TOKEN: logger.error("BOT_TOKEN not set!"); return
     if not WEBAPP_URL: logger.error("WEBAPP_URL not set!"); return
 
-    # Start HTTP server (health + OTP endpoint)
     threading.Thread(
         target=lambda: HTTPServer(('0.0.0.0', PORT), Handler).serve_forever(),
         daemon=True
     ).start()
-    logger.info(f"HTTP server on port {PORT}")
+    logger.info(f"HTTP server on port {PORT} (with Supabase proxy at /proxy/)")
 
     _app = Application.builder().token(BOT_TOKEN).build()
-
     _app.add_handler(CommandHandler("start",   start))
     _app.add_handler(CommandHandler("wallet",  wallet))
     _app.add_handler(CommandHandler("help",    help_cmd))
@@ -195,7 +312,6 @@ def main():
     _app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     _loop = asyncio.get_event_loop()
-
     logger.info(f"Bot started. WEBAPP_URL={WEBAPP_URL}")
     _app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
